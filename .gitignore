@@ -9,3 +9,4 @@ compile_commands.json
 
 .cache/
 .tmp_versions/
+*.code-workspace
