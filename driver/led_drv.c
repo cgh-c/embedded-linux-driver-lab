@@ -3,6 +3,7 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/uaccess.h>
 
 #define DEVICE_NAME "led_drv"
 
@@ -22,10 +23,30 @@ static int led_release(struct inode *inode, struct file *file)
     return 0;
 }
 
+static ssize_t led_write(struct file *file, const char __user *buf,
+                         size_t count, loff_t *ppos)
+{
+    char kbuf[64];
+    size_t len = count;
+
+    if (len >= sizeof(kbuf))
+        len = sizeof(kbuf) - 1;
+
+    if (copy_from_user(kbuf, buf, len))
+        return -EFAULT;
+
+    kbuf[len] = '\0';
+
+    pr_info("led_drv: write, count=%zu, data=%s\n", count, kbuf);
+
+    return count;
+}
+
 static const struct file_operations led_fops = {
     .owner = THIS_MODULE,
     .open = led_open,
     .release = led_release,
+    .write = led_write,
 };
 
 static int __init led_drv_init(void)
