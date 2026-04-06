@@ -4,112 +4,26 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/uaccess.h>
-#include <linux/io.h>
-#include <linux/errno.h>
 
-/* i.MX6ULL: GPIO5_IO03 -> SNVS_TAMPER3 */
-#define CCM_CCGR1_ADDR                       0x020C406C
-#define IOMUXC_SNVS_SW_MUX_CTL_PAD_TAMPER3   0x02290014
-#define GPIO5_DR_ADDR                        0x020AC000
-#define GPIO5_GDIR_ADDR                      0x020AC004
-
-#define GPIO5_IO03_BIT                       3
+#include <linux/platform_device.h>
+#include <linux/gpio/consumer.h>
+#include <linux/of.h>
 
 #define DEVICE_NAME "led_drv"
 
-static dev_t led_devno;
-static struct cdev led_cdev;
-static struct class *led_class;
+struct led_drv_data {
+    dev_t devno;
+    struct cdev cdev;
+    struct class *class;
+    struct device *device;
+    struct gpio_desc *led_gpiod;
+};
 
-/* hardcoded registers for experiment */
-static void __iomem *ccm_ccgr1;
-static void __iomem *iomuxc_tamper3_mux;
-static void __iomem *gpio5_dr;
-static void __iomem *gpio5_gdir;
-
-static int led_hw_init(void)
-{
-    u32 val;
-
-    ccm_ccgr1 = ioremap(CCM_CCGR1_ADDR, 4);
-    iomuxc_tamper3_mux = ioremap(IOMUXC_SNVS_SW_MUX_CTL_PAD_TAMPER3, 4);
-    gpio5_dr = ioremap(GPIO5_DR_ADDR, 4);
-    gpio5_gdir = ioremap(GPIO5_GDIR_ADDR, 4);
-
-    if (!ccm_ccgr1 || !iomuxc_tamper3_mux || !gpio5_dr || !gpio5_gdir) {
-        pr_err("led_drv: ioremap failed\n");
-        return -ENOMEM;
-    }
-
-    /* 1. enable GPIO5 clock: CCGR1[31:30] = 0b11 */
-    val = readl(ccm_ccgr1);
-    val |= (0x3 << 30);
-    writel(val, ccm_ccgr1);
-
-    /* 2. set SNVS_TAMPER3 to GPIO mode: ALT5 */
-    val = readl(iomuxc_tamper3_mux);
-    val &= ~0xf;
-    val |= 0x5;
-    writel(val, iomuxc_tamper3_mux);
-
-    /* 3. set GPIO5_IO03 as output */
-    val = readl(gpio5_gdir);
-    val |= (1U << GPIO5_IO03_BIT);
-    writel(val, gpio5_gdir);
-
-    /* 4. default OFF: active low, so output high */
-    val = readl(gpio5_dr);
-    val |= (1U << GPIO5_IO03_BIT);
-    writel(val, gpio5_dr);
-
-    pr_info("led_drv: hw init done, GPIO5_IO03 configured\n");
-    return 0;
-}
-
-static void led_hw_set(int on)
-{
-    u32 val;
-
-    val = readl(gpio5_dr);
-
-    if (on) {
-        /* active low: 0 = ON */
-        val &= ~(1U << GPIO5_IO03_BIT);
-    } else {
-        /* active low: 1 = OFF */
-        val |= (1U << GPIO5_IO03_BIT);
-    }
-
-    writel(val, gpio5_dr);
-}
-
-static void led_hw_deinit(void)
-{
-    if (gpio5_dr) {
-        /* leave LED off */
-        led_hw_set(0);
-        iounmap(gpio5_dr);
-        gpio5_dr = NULL;
-    }
-
-    if (gpio5_gdir) {
-        iounmap(gpio5_gdir);
-        gpio5_gdir = NULL;
-    }
-
-    if (iomuxc_tamper3_mux) {
-        iounmap(iomuxc_tamper3_mux);
-        iomuxc_tamper3_mux = NULL;
-    }
-
-    if (ccm_ccgr1) {
-        iounmap(ccm_ccgr1);
-        ccm_ccgr1 = NULL;
-    }
-}
+static struct led_drv_data *g_led;
 
 static int led_open(struct inode *inode, struct file *file)
 {
+    file->private_data = g_led;
     pr_info("led_drv: open\n");
     return 0;
 }
@@ -123,22 +37,36 @@ static int led_release(struct inode *inode, struct file *file)
 static ssize_t led_write(struct file *file, const char __user *buf,
                          size_t count, loff_t *ppos)
 {
-   char ch;
+    char kbuf[8];
+    size_t len;
+    struct led_drv_data *drvdata = file->private_data;
 
-    if (count < 1)
-        return -EINVAL;
+    if (!drvdata || !drvdata->led_gpiod)
+        return -ENODEV;
 
-    if (copy_from_user(&ch, buf, 1))
+    len = min(count, sizeof(kbuf) - 1);
+
+    if (copy_from_user(kbuf, buf, len))
         return -EFAULT;
 
-    if (ch == '1') {
-        led_hw_set(1);
+    kbuf[len] = '\0';
+
+    /*
+     * echo 1 > /dev/led_drv 会带换行
+     * 所以只看第一个字符
+     */
+    if (kbuf[0] == '1') {
+        /*
+         * 设备树里用了 GPIO_ACTIVE_LOW，
+         * gpiod_set_value() 传 1 表示逻辑“激活”
+         */
+        gpiod_set_value(drvdata->led_gpiod, 1);
         pr_info("led_drv: LED ON\n");
-    } else if (ch == '0') {
-        led_hw_set(0);
+    } else if (kbuf[0] == '0') {
+        gpiod_set_value(drvdata->led_gpiod, 0);
         pr_info("led_drv: LED OFF\n");
     } else {
-        pr_err("led_drv: invalid input '%c'\n", ch);
+        pr_err("led_drv: invalid input: %c\n", kbuf[0]);
         return -EINVAL;
     }
 
@@ -152,63 +80,111 @@ static const struct file_operations led_fops = {
     .write = led_write,
 };
 
-static int __init led_drv_init(void)
+static int led_chrdev_register(struct led_drv_data *drvdata)
 {
     int ret;
 
-    ret = alloc_chrdev_region(&led_devno, 0, 1, DEVICE_NAME);
-    if (ret < 0) {
-        pr_err("led_drv: alloc_chrdev_region failed\n");
+    ret = alloc_chrdev_region(&drvdata->devno, 0, 1, DEVICE_NAME);
+    if (ret < 0)
         return ret;
+
+    cdev_init(&drvdata->cdev, &led_fops);
+    drvdata->cdev.owner = THIS_MODULE;
+
+    ret = cdev_add(&drvdata->cdev, drvdata->devno, 1);
+    if (ret)
+        goto err_unregister;
+
+    drvdata->class = class_create(THIS_MODULE, DEVICE_NAME);
+    if (IS_ERR(drvdata->class)) {
+        ret = PTR_ERR(drvdata->class);
+        goto err_cdev_del;
     }
 
-    cdev_init(&led_cdev, &led_fops);
-    led_cdev.owner = THIS_MODULE;
-
-    ret = cdev_add(&led_cdev, led_devno, 1);
-    if (ret < 0) {
-        pr_err("led_drv: cdev_add failed\n");
-        unregister_chrdev_region(led_devno, 1);
-        return ret;
+    drvdata->device = device_create(drvdata->class, NULL,
+                                    drvdata->devno, NULL, DEVICE_NAME);
+    if (IS_ERR(drvdata->device)) {
+        ret = PTR_ERR(drvdata->device);
+        goto err_class_destroy;
     }
 
-    led_class = class_create(THIS_MODULE, DEVICE_NAME);
-    if (IS_ERR(led_class)) {
-        pr_err("led_drv: class_create failed\n");
-        cdev_del(&led_cdev);
-        unregister_chrdev_region(led_devno, 1);
-        return PTR_ERR(led_class);
+    pr_info("led_drv: chrdev registered, major=%d minor=%d\n",
+            MAJOR(drvdata->devno), MINOR(drvdata->devno));
+    return 0;
+
+err_class_destroy:
+    class_destroy(drvdata->class);
+err_cdev_del:
+    cdev_del(&drvdata->cdev);
+err_unregister:
+    unregister_chrdev_region(drvdata->devno, 1);
+    return ret;
+}
+
+static void led_chrdev_unregister(struct led_drv_data *drvdata)
+{
+    device_destroy(drvdata->class, drvdata->devno);
+    class_destroy(drvdata->class);
+    cdev_del(&drvdata->cdev);
+    unregister_chrdev_region(drvdata->devno, 1);
+}
+
+static int led_probe(struct platform_device *pdev)
+{
+    int ret;
+    struct led_drv_data *drvdata;
+
+    pr_info("led_drv: probe start\n");
+
+    drvdata = devm_kzalloc(&pdev->dev, sizeof(*drvdata), GFP_KERNEL);
+    if (!drvdata)
+        return -ENOMEM;
+
+    drvdata->led_gpiod = devm_gpiod_get(&pdev->dev, "led", GPIOD_OUT_LOW);
+    if (IS_ERR(drvdata->led_gpiod)) {
+        dev_err(&pdev->dev, "failed to get led-gpios\n");
+        return PTR_ERR(drvdata->led_gpiod);
     }
 
-    device_create(led_class, NULL, led_devno, NULL, DEVICE_NAME);
+    g_led = drvdata;
+    platform_set_drvdata(pdev, drvdata);
 
-    ret = led_hw_init();
+    ret = led_chrdev_register(drvdata);
     if (ret) {
-        device_destroy(led_class, led_devno);
-        class_destroy(led_class);
-        cdev_del(&led_cdev);
-        unregister_chrdev_region(led_devno, 1);
+        dev_err(&pdev->dev, "failed to register chrdev\n");
         return ret;
     }
 
-    pr_info("led_drv: init, major=%d, minor=%d\n", MAJOR(led_devno), MINOR(led_devno));
+    pr_info("led_drv: probe success\n");
     return 0;
 }
 
-static void __exit led_drv_exit(void)
+static int led_remove(struct platform_device *pdev)
 {
-    led_hw_deinit();
-    device_destroy(led_class, led_devno);
-    class_destroy(led_class);
-    cdev_del(&led_cdev);
-    unregister_chrdev_region(led_devno, 1);
+    struct led_drv_data *drvdata = platform_get_drvdata(pdev);
 
-    pr_info("led_drv: exit\n");
+    pr_info("led_drv: remove\n");
+    led_chrdev_unregister(drvdata);
+    return 0;
 }
 
-module_init(led_drv_init);
-module_exit(led_drv_exit);
+static const struct of_device_id led_of_match[] = {
+    { .compatible = "cgh,leddrv" },
+    { }
+};
+MODULE_DEVICE_TABLE(of, led_of_match);
+
+static struct platform_driver led_platform_driver = {
+    .probe  = led_probe,
+    .remove = led_remove,
+    .driver = {
+        .name = "cgh_led_drv",
+        .of_match_table = led_of_match,
+    },
+};
+
+module_platform_driver(led_platform_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("cgh-c");
-MODULE_DESCRIPTION("hardcoded GPIO5_IO03 LED driver experiment");
+MODULE_DESCRIPTION("LED driver based on platform_driver + device tree");
