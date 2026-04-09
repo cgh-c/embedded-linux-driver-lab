@@ -1,6 +1,11 @@
 {
 	"folders": [
 		{
+			"name": "Linux-4.9.88",
+			"path": "../Linux-4.9.88"
+		},
+		{
+			"name": "embedded-linux-driver-lab",
 			"path": "."
 		}
 	],
