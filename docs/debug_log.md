@@ -82,6 +82,39 @@ rsync -aH --progress book@旧机IP:~/100ask_imx6ull-sdk/ToolChain ~/
 
 ---
 
+## 2026-04-14: key_drv probe 失败 — GPIO 被 built-in 驱动占用 (EBUSY)
+
+**问题现象**: `insmod key_drv.ko` 后 probe 失败，dmesg 输出:
+```
+key_drv: probe start
+cgh_key_drv key_drv: failed to get key-gpios
+cgh_key_drv: probe of key_drv failed with error -16
+```
+错误码 `-16` 即 `EBUSY`。
+
+**排查过程**:
+1. `cat /sys/kernel/debug/gpio | grep gpio-129` 发现 GPIO5_IO01（gpio-129）已被占用:
+   ```
+   gpio-129 (  |User1 Button  ) in  hi IRQ
+   ```
+2. `lsmod | grep gpio` 无输出 — 说明占用 GPIO 的 `gpio-keys` 驱动是**编译进内核的 (built-in)**，无法 rmmod
+3. 查看设备树源码，确认默认 DTS 中有 `gpio-keys` 节点，其 `user1` 子节点使用了 `<&gpio5 1 GPIO_ACTIVE_LOW>`，和我们的 `key_drv` 冲突
+
+**解决方法**: 在 DTS 文件 `100ask_imx6ull-14x14.dts` 中禁用默认的 `gpio-keys` 节点:
+```dts
+gpio-keys {
+    status = "disabled";
+};
+```
+重新编译 DTB 并部署到板子，`insmod key_drv.ko` 成功，probe 正常。
+
+**教训**:
+- `devm_gpiod_get` 返回 `-EBUSY` 时，先用 `/sys/kernel/debug/gpio` 查看该 GPIO 被谁占用
+- built-in 驱动不出现在 `lsmod`，只能通过设备树 `status = "disabled"` 来禁用
+- 加载自定义驱动前，要检查默认设备树中是否有节点已经绑定了同一个 GPIO
+
+---
+
 ## 2026-04: Ubuntu 双网卡路由导致开发板 ping 不通
 
 **问题现象**: Ubuntu 虚拟机有 NAT + Host-Only 双网卡，默认路由走 NAT，导致开发板 (192.168.5.x 段) 的包无法回来。
