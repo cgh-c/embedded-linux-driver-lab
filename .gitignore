@@ -10,3 +10,7 @@ compile_commands.json
 .cache/
 .tmp_versions/
 *.code-workspace
+
+# user-space binaries
+app/led_test
+app/key_test

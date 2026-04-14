@@ -1,4 +1,5 @@
 obj-m += led_drv.o
+obj-m += key_drv.o
 
 KDIR := /home/cgh/Linux-4.9.88
 PWD  := $(shell pwd)
